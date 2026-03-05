@@ -1,0 +1,92 @@
+# Cloud Build configuration for Alpaca MCP Server
+# This file defines the build steps for Google Cloud Build
+
+substitutions:
+  _SERVICE_NAME: robt-alpaca-mcp
+  _REGION: us-central1
+  _REGISTRY: us-central1-docker.pkg.dev/${PROJECT_ID}/alpaca-mcp
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'
+
+steps:
+  # Step 1: Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - '${_REGISTRY}/${_SERVICE_NAME}:${SHORT_SHA}'
+      - '-t'
+      - '${_REGISTRY}/${_SERVICE_NAME}:latest'
+      - '-f'
+      - 'Dockerfile.cloudrun'
+      - '.'
+    id: 'build-image'
+
+  # Step 2: Push the image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '--all-tags'
+      - '${_REGISTRY}/${_SERVICE_NAME}'
+    id: 'push-image'
+    waitFor: ['build-image']
+
+  # Step 3: Deploy to Cloud Run (Development/Staging)
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - '${_SERVICE_NAME}-dev'
+      - '--image=${_REGISTRY}/${_SERVICE_NAME}:${SHORT_SHA}'
+      - '--region=${_REGION}'
+      - '--platform=managed'
+      - '--no-allow-unauthenticated'
+      - '--min-instances=0'
+      - '--max-instances=10'
+      - '--memory=512Mi'
+      - '--cpu=1'
+      - '--timeout=300'
+      - '--concurrency=1000'
+      - '--port=8000'
+      - '--set-secrets=ALPACA_API_KEY=ALPACA_API_KEY_DEV:latest,ALPACA_SECRET_KEY=ALPACA_SECRET_KEY_DEV:latest'
+      - '--set-env-vars=ALPACA_PAPER_TRADE=true,DEBUG=true'
+    id: 'deploy-dev'
+    waitFor: ['push-image']
+
+  # Step 4: Deploy to Cloud Run (Production) - Only on tags
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        if [[ "$TAG_NAME" ]]; then
+          gcloud run deploy ${_SERVICE_NAME} \
+            --image=${_REGISTRY}/${_SERVICE_NAME}:${SHORT_SHA} \
+            --region=${_REGION} \
+            --platform=managed \
+            --allow-unauthenticated \
+            --min-instances=0 \
+            --max-instances=100 \
+            --memory=512Mi \
+            --cpu=1 \
+            --timeout=300 \
+            --concurrency=1000 \
+            --port=8000 \
+            --set-secrets=ALPACA_API_KEY=ALPACA_API_KEY:latest,ALPACA_SECRET_KEY=ALPACA_SECRET_KEY:latest \
+            --set-env-vars=ALPACA_PAPER_TRADE=false,DEBUG=false
+        else
+          echo "Skipping production deployment (not a tag)"
+        fi
+    id: 'deploy-prod'
+    waitFor: ['deploy-dev']
+
+# Store images in Artifact Registry
+images:
+  - '${_REGISTRY}/${_SERVICE_NAME}:${SHORT_SHA}'
+  - '${_REGISTRY}/${_SERVICE_NAME}:latest'
+
+# Timeout for the entire build
+timeout: '1200s'
